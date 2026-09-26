@@ -43,6 +43,19 @@ web    ~/code/web-app
 infra  ~/code/infrastructure
 ```
 
+## Dock icon
+
+```bash
+./dock/make-dock-app.sh --dock
+```
+
+Builds **Claude Workspace.app** into `/Applications` and adds it to the Dock. Clicking it runs
+`cc` — so getting your whole workspace back is one click, whether the terminal was closed or
+the machine rebooted. It logs to `~/.claude/cc-dock.log`, so a launch that fails says why
+instead of doing nothing.
+
+Omit `--dock` to just build it and drag it yourself.
+
 ## Commands
 
 | Command | Does |
