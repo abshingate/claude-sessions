@@ -15,7 +15,7 @@ SNAP="$HOME/.claude/cc-open-sessions.tsv"
 
 list_raw() {
   # Read BOTH apps. ccs was Terminal-only and went blind the moment sessions
-  # moved to iTerm2 (found 2026-09-26: a live munshi tab was invisible).
+  # moved to iTerm2: a live tab in another app was simply invisible to it.
   # Output: <app>|<id>|<name>
   osascript 2>/dev/null <<'AS'
 tell application "Terminal"

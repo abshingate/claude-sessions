@@ -9,8 +9,8 @@
 #   cc-inbox add exa   queue a project (this is what a remote session runs)
 #   cc-inbox status    show the queue and whether the watcher is live
 #
-# From the phone, tell Claude:  "run: cc-inbox add munshi"
-# A tab opens on the Mac in ~/Documents/Workspaces/munshi with claude running.
+# From the phone, tell Claude:  "run: cc-inbox add api"
+# A tab opens on the Mac in that project with claude running.
 
 INBOX="$HOME/.claude/cc-inbox.queue"
 LOG="$HOME/.claude/cc-inbox.log"
