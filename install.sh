@@ -33,6 +33,21 @@ else
   print "  kept existing $CONFIG/projects.conf"
 fi
 
+# iTerm2 Python API daemon: window titles that show the real directory.
+# Optional - everything else works without it.
+API_DIR="$HOME/Library/Application Support/iTerm2/Scripts/AutoLaunch"
+if [[ -d /Applications/iTerm.app && -f "$SRC/iterm2-api/claude_sessions.py" ]]; then
+  if python3 -c "import iterm2" 2>/dev/null; then
+    mkdir -p "$API_DIR"
+    install -m 644 "$SRC/iterm2-api/claude_sessions.py" "$API_DIR/"
+    defaults write com.googlecode.iterm2 EnableAPIServer -bool true
+    print "  installed the iTerm2 API daemon (restart iTerm2 to activate)"
+  else
+    print "  skipped the iTerm2 API daemon - run: pip3 install --user iterm2"
+    print "    then re-run this installer for richer window titles"
+  fi
+fi
+
 print "\nInstalled: $(ls "$SRC"/bin | tr '\n' ' ')"
 case ":$PATH:" in
   *":$PREFIX/bin:"*) ;;

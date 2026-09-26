@@ -56,6 +56,18 @@ instead of doing nothing.
 
 Omit `--dock` to just build it and drag it yourself.
 
+## Richer window titles (optional)
+
+The tab shows the project; the window bar shows **where that session actually is**:
+
+```
+Exadatum  —  ~/Documents/Exadatum  ·  14 sessions
+```
+
+This needs iTerm2's Python API, because inside tmux iTerm2 cannot see a pane's real working
+directory — it reports the outer shell's. `install.sh` sets it up if `pip3 install --user
+iterm2` has been run. See [iterm2-api/](iterm2-api/).
+
 ## Commands
 
 | Command | Does |
