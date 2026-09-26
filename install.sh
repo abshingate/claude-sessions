@@ -35,7 +35,10 @@ fi
 
 # iTerm2 Python API daemon: window titles that show the real directory.
 # Optional - everything else works without it.
-API_DIR="$HOME/Library/Application Support/iTerm2/Scripts/AutoLaunch"
+# Honour a test/alternate home the same way PREFIX does, so an install into
+# a throwaway prefix does not write into the real home directory.
+API_HOME="${CS_HOME:-$HOME}"
+API_DIR="$API_HOME/Library/Application Support/iTerm2/Scripts/AutoLaunch"
 if [[ -d /Applications/iTerm.app && -f "$SRC/iterm2-api/claude_sessions.py" ]]; then
   if python3 -c "import iterm2" 2>/dev/null; then
     mkdir -p "$API_DIR"

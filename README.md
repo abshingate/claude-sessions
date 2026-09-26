@@ -30,9 +30,28 @@ Open a dozen Claude Code sessions across projects and two things go wrong:
 ## Install
 
 ```bash
-git clone <this repo> claude-sessions
+brew install tmux                          # if you don't have it
+brew install --cask iterm2                 # if you don't have it
+pip3 install --user iterm2                 # optional: richer window titles
+
+git clone https://github.com/abshingate/claude-sessions.git
 cd claude-sessions && ./install.sh
+```
+
+Then add your projects:
+
+```bash
 $EDITOR ~/.config/claude-sessions/projects.conf
+```
+
+If `~/.local/bin` isn't on your `PATH`, the installer tells you the line to add.
+
+**Try it:**
+
+```bash
+cct api          # opens a Claude session in that project
+ccs              # see everything running
+cc               # bring it all back after closing the terminal
 ```
 
 `projects.conf` maps a shortcut to a directory:
