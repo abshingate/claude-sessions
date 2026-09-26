@@ -1,0 +1,75 @@
+#!/bin/zsh
+# ccw — open Claude sessions in iTerm2, one TAB per project, in one window.
+#
+#   ccw                  open the default set as tabs in a single window
+#   ccw work api web     open just those
+#   ccw -l               list available projects
+#   ccw -k               list what's running (tmux sessions)
+#
+# Each tab runs claude inside tmux, so closing the window or quitting iTerm2
+# does NOT kill the session - reattach with the same command, or `ccs`.
+# Nothing survives a reboot; use `cc-snapshot` for that.
+
+# --- shared config -----------------------------------------------------
+CS_SHARE="${CS_SHARE:-${0:A:h}/../share}"
+[[ -r "$CS_SHARE/common.zsh" ]] && source "$CS_SHARE/common.zsh"
+# -----------------------------------------------------------------------
+
+setopt local_options no_nomatch
+
+cs_load_projects
+# First four projects in projects.conf, unless CS_DEFAULT_PROJECTS is set.
+DEFAULT=(${(s: :)CS_DEFAULT_PROJECTS})
+[[ ${#DEFAULT} -eq 0 ]] && { cs_load_projects; DEFAULT=(${(ko)PROJ[@]:0:4}) }
+
+case "${1:-}" in
+  -l|--list) for k in ${(ko)PROJ}; do printf "  %-9s %s\n" "$k" "${PROJ[$k]}"; done; exit 0 ;;
+  -k|--running) tmux ls 2>/dev/null || print "  (no tmux sessions running)"; exit 0 ;;
+  -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+WANT=("${@:-${DEFAULT[@]}}")
+[[ ${#WANT} -eq 0 ]] && WANT=(${DEFAULT[@]})
+
+# validate first, so a typo doesn't half-open a window
+TARGETS=()
+for k in $WANT; do
+  local p="${PROJ[$k]:-}"
+  [[ -z "$p" ]] && { print -u2 "ccw: unknown project '$k' (ccw -l to list)"; exit 2; }
+  [[ ! -d "$p" ]] && { print -u2 "ccw: $k -> $p does not exist"; exit 2; }
+  TARGETS+=("$k")
+done
+
+first=1
+for k in $TARGETS; do
+  dir="${PROJ[$k]}"
+  sess="${dir:t}"
+  cmd="cd ${(q)dir} && tmux new-session -A -s ${(q)sess} claude"
+  if (( first )); then
+    osascript >/dev/null <<AS
+tell application "iTerm2"
+  set w to (create window with default profile)
+  tell current session of current tab of w
+    write text "$cmd"
+    set name to "$sess"
+  end tell
+end tell
+AS
+    first=0
+  else
+    osascript >/dev/null <<AS
+tell application "iTerm2"
+  tell current window
+    set t to (create tab with default profile)
+    tell current session of t
+      write text "$cmd"
+      set name to "$sess"
+    end tell
+  end tell
+end tell
+AS
+  fi
+  print "  tab: $k -> $dir"
+  sleep 0.4
+done
+print "ccw: ${#TARGETS} tabs. Sidebar lists them; ⌘1..⌘9 or click to switch."

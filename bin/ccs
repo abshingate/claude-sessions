@@ -1,0 +1,141 @@
+#!/bin/zsh
+# ccs — see every open Claude session, and jump to one.
+#
+#   ccs            list what's open: number, folder, title
+#   ccs 7          bring window 7 to the front
+#   ccs save       snapshot what's open (for after a reboot)
+#   ccs restore    reopen everything from the last snapshot
+#
+# Solves: "I have so many tabs open I forget which one is what, which folder."
+# The window titles already carry it; this just makes them readable in one
+# place instead of squinting at a crowded window menu.
+
+setopt local_options no_nomatch
+SNAP="$HOME/.claude/cc-open-sessions.tsv"
+
+list_raw() {
+  # Read BOTH apps. ccs was Terminal-only and went blind the moment sessions
+  # moved to iTerm2 (found 2026-09-26: a live munshi tab was invisible).
+  # Output: <app>|<id>|<name>
+  osascript 2>/dev/null <<'AS'
+tell application "Terminal"
+  set out to ""
+  try
+    repeat with i from 1 to count of windows
+      try
+        if busy of window i then set out to out & "Terminal|" & (id of window i) & "|" & (name of window i) & linefeed
+      end try
+    end repeat
+  end try
+  return out
+end tell
+AS
+  osascript 2>/dev/null <<'AS'
+tell application "iTerm2"
+  set out to ""
+  try
+    repeat with w in windows
+      repeat with t in tabs of w
+        try
+          set ss to current session of t
+          -- Use the session's real working directory: `name` is whatever the
+          -- shell last set (env, login, -zsh) and is useless as a label.
+          set p to ""
+          try
+            set p to (variable ss named "path")
+          end try
+          if p is "" then set p to (name of ss)
+          set out to out & "iTerm|" & (id of ss) & "|" & p & "|" & (name of ss) & linefeed
+        end try
+      end repeat
+    end repeat
+  end try
+  return out
+end tell
+AS
+}
+
+# title -> folder, short title
+parse() {
+  local name="$1"
+  FOLDER="${name%% — *}"
+  local rest="${name#* — }"
+  TITLE="${rest%% — *}"
+  TITLE="${TITLE#✳ }"; TITLE="${TITLE#◐ }"; TITLE="${TITLE#● }"
+  [[ "$TITLE" == *"--resume"* || "$TITLE" == "-zsh" || "$TITLE" == caffeinate* ]] && TITLE="(no title)"
+}
+
+# Show the user a small sequential number, but remember the WINDOW ID behind
+# it (ids are stable; z-order indexes are not). The map is cached so `ccs 7`
+# resolves without re-listing.
+MAP="$HOME/.claude/.ccs-map"
+
+cmd_list() {
+  local n=0
+  : > "$MAP"
+  print -P "%F{cyan}open Claude sessions%f  — %F{242}ccs <n> to jump%f"
+  while IFS='|' read -r app wid name extra; do
+    [[ -z "$wid" || -z "$name" ]] && continue
+    if [[ "$app" == "iTerm" ]]; then
+      # $name is the path; $extra is the shell-set name
+      FOLDER="${name:t}"
+      TITLE="$extra"
+      [[ "$TITLE" == "$FOLDER" || "$TITLE" == (env|login|-zsh|zsh|claude) ]] && TITLE="claude"
+      [[ "$name" != /* ]] && FOLDER="$name"
+    else
+      parse "$name"
+    fi
+    (( n++ ))
+    printf '%s\t%s\t%s\n' "$n" "$app" "$wid" >> "$MAP"
+    local tag=""; [[ "$app" == "iTerm" ]] && tag="%F{39}i%f " || tag="%F{242}T%f "
+    print -P "%F{242}$(printf '%2d' $n)%f $tag%F{green}$(printf '%-17s' "$FOLDER")%f $TITLE"
+  done < <(list_raw)
+  (( n == 0 )) && print "  (none)"
+}
+
+cmd_jump() {
+  local want="$1" app wid row
+  [[ -f "$MAP" ]] || cmd_list >/dev/null
+  row="$(awk -F'\t' -v n="$want" '$1==n{print $2"\t"$3}' "$MAP")"
+  [[ -z "$row" ]] && { cmd_list >/dev/null; row="$(awk -F'\t' -v n="$want" '$1==n{print $2"\t"$3}' "$MAP")"; }
+  [[ -z "$row" ]] && { print -u2 "ccs: no session $want (run 'ccs' to list)"; exit 1; }
+  app="${row%%	*}"; wid="${row#*	}"
+
+  if [[ "$app" == "iTerm" ]]; then
+    # Sessions are addressed by their own id; select the tab that holds it.
+    osascript >/dev/null 2>&1 <<AS
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        if (id of current session of t) is "$wid" then
+          select t
+          select w
+          activate
+        end if
+      end try
+    end repeat
+  end repeat
+end tell
+AS
+  else
+    osascript >/dev/null 2>&1 <<AS
+tell application "Terminal"
+  set wn to (first window whose id is $wid)
+  set index of wn to 1
+  set frontmost of wn to true
+  activate
+end tell
+AS
+  fi
+  print "→ jumped to session $want"
+}
+
+case "${1:-list}" in
+  list|ls|"")   cmd_list ;;
+  save)         cc-snapshot ;;
+  restore)      shift; cc-snapshot restore "$@" ;;
+  -h|--help)    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' ;;
+  <->)          cmd_jump "$1" ;;
+  *) print -u2 "ccs: unknown command '$1' (try: ccs, ccs <number>, ccs save, ccs restore)"; exit 2 ;;
+esac

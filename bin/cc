@@ -1,0 +1,51 @@
+#!/bin/zsh
+# cc — bring your Claude workspace back, whatever state the Mac is in.
+#
+#   cc            do the right thing (this is the one command to remember)
+#   cc -n         say what it would do, change nothing
+#   cc status     what is running right now
+#
+# It decides for you:
+#   • tmux sessions alive  -> reattach them (claude never stopped)
+#   • none alive           -> restore from the saved map (--resume each)
+#
+# This is the ONLY command you need after closing iTerm2 or rebooting.
+
+setopt local_options no_nomatch
+export PATH="$HOME/.local/bin:$PATH"
+
+live=0
+tmux ls >/dev/null 2>&1 && live=$(tmux ls 2>/dev/null | wc -l | tr -d ' ')
+
+case "${1:-}" in
+  status)
+    print "tmux sessions: $live"
+    [[ $live -gt 0 ]] && tmux ls 2>/dev/null | sed 's/^/  /'
+    print "iTerm2: $(pgrep -f 'iTerm.app' >/dev/null && print running || print 'not running')"
+    m="$HOME/.claude/cc-session-map.json"
+    [[ -f "$m" ]] && print "saved map: $(date -r "$m" '+%F %H:%M') ($(python3 -c "
+import json;print(len([r for r in json.load(open('$m'))['sessions'] if r.get('was_open')]))" 2>/dev/null) open sessions)"
+    exit 0 ;;
+  -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+DRY=0
+[[ "${1:-}" == "-n" || "${1:-}" == "--dry-run" ]] && DRY=1
+
+if [[ $live -gt 0 ]]; then
+  print "cc: $live tmux session(s) alive — claude never stopped."
+  if (( DRY )); then
+    print "    would run: cc-reattach"
+    exit 0
+  fi
+  exec cc-reattach
+else
+  print "cc: no tmux sessions — the Mac was restarted."
+  if (( DRY )); then
+    print "    would run: cc-session-map restore"
+    cc-session-map restore -n 2>/dev/null | head -6
+    exit 0
+  fi
+  print "    restoring from the saved map (each session resumed by id)..."
+  cc-session-map restore
+fi

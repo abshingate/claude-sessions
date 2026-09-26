@@ -1,0 +1,134 @@
+#!/bin/zsh
+# cct — new Claude session in a NEW TAB of the current iTerm2 window.
+#
+#   cct                    tab here (current folder)
+#   cct exa                tab in a known project (cct -l lists them)
+#   cct ~/some/path        tab in that folder — created if missing, after asking
+#   cct exa "close FY22"   start claude with an opening prompt
+#   cct -w <dir>           new WINDOW instead of a tab
+#   cct -s <dir>           split the current tab instead (side by side)
+#   cct -n <dir>           shell only, don't start claude
+#   cct -r <dir>           resume the newest session in that folder
+#
+# Runs claude inside tmux, so closing the tab or quitting iTerm2 does not kill
+# it. Nothing survives a reboot - use `cc-session-map restore` for that.
+
+# --- shared config -----------------------------------------------------
+CS_SHARE="${CS_SHARE:-${0:A:h}/../share}"
+[[ -r "$CS_SHARE/common.zsh" ]] && source "$CS_SHARE/common.zsh"
+# -----------------------------------------------------------------------
+
+setopt local_options no_nomatch
+
+cs_load_projects
+
+MODE=tab; START=1; RESUME=0
+while [[ "$1" == -* ]]; do
+  case "$1" in
+    -w|--window) MODE=window; shift ;;
+    -s|--split)  MODE=split;  shift ;;
+    -n|--no-claude) START=0;  shift ;;
+    -r|--resume) RESUME=1;    shift ;;
+    -l|--list) for k in ${(ko)PROJ}; do printf "  %-9s %s\n" "$k" "${PROJ[$k]}"; done; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) print -u2 "cct: unknown option $1"; exit 2 ;;
+  esac
+done
+
+TARGET="${1:-$PWD}"; PROMPT="${2:-}"
+[[ -n "${PROJ[$TARGET]:-}" ]] && TARGET="${PROJ[$TARGET]}"
+TARGET="${TARGET/#\~/$HOME}"
+[[ "$TARGET" != /* ]] && TARGET="$PWD/$TARGET"
+
+if [[ ! -d "$TARGET" ]]; then
+  print -n "cct: $TARGET does not exist. Create it? [y/N] "
+  read -r reply
+  [[ "$reply" == [yY]* ]] || { print "cct: aborted."; exit 1; }
+  mkdir -p "$TARGET"
+fi
+
+SESS="${TARGET:t}"
+# unique tmux name per tab, so two tabs on one folder don't fight over it
+if tmux has-session -t "=$SESS" 2>/dev/null; then
+  i=2; while tmux has-session -t "=$SESS-$i" 2>/dev/null; do (( i++ )); done
+  SESS="$SESS-$i"
+fi
+
+if (( START )); then
+  # Flags come from CLAUDE_DEFAULT_FLAGS (set in ~/.zshrc) so there is ONE
+  # place to change them. The tmux pane runs a non-interactive shell that does
+  # not source .zshrc, so pass them explicitly rather than relying on the
+  # `claude` function being defined.
+  FLAGS="${CLAUDE_DEFAULT_FLAGS}"
+  # Name the Remote Control session after the folder. Without a name every
+  # session shows on the phone as the hostname, so 16 of them are
+  # indistinguishable - which defeats the point of managing them remotely.
+  if [[ "$FLAGS" == *--remote-control* ]]; then
+    FLAGS="${FLAGS/--remote-control/--remote-control ${(q)SESS}}"
+  fi
+  INNER="command claude $FLAGS"
+  if (( RESUME )); then
+    SID="$(cc-session-map discover 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' \
+           | awk -v d="${TARGET:t}" '$0 ~ d {print $3; exit}')"
+    [[ -n "$SID" ]] && INNER="$INNER --resume $SID" \
+                    && print "cct: resuming ${SID:0:8}" \
+                    || print "cct: no prior session found, starting fresh"
+  fi
+  [[ -n "$PROMPT" ]] && INNER="$INNER ${(q)PROMPT}"
+  CMD="cd ${(q)TARGET} && tmux new-session -A -s ${(q)SESS} ${(q)INNER}"
+else
+  CMD="cd ${(q)TARGET}"
+fi
+
+esc() { print -r -- "${${1//\\/\\\\}//\"/\\\"}" }
+C="$(esc "$CMD")"; N="$(esc "$SESS")"
+
+case $MODE in
+  tab)
+    osascript >/dev/null <<AS
+tell application "iTerm2"
+  if (count of windows) is 0 then
+    set w to (create window with default profile)
+    tell current session of current tab of w
+      write text "$C"
+      set name to "$N"
+    end tell
+  else
+    tell current window
+      set t to (create tab with default profile)
+      tell current session of t
+        write text "$C"
+        set name to "$N"
+      end tell
+    end tell
+  end if
+end tell
+AS
+    ;;
+  window)
+    osascript >/dev/null <<AS
+tell application "iTerm2"
+  set w to (create window with default profile)
+  tell current session of current tab of w
+    write text "$C"
+    set name to "$N"
+  end tell
+end tell
+AS
+    ;;
+  split)
+    osascript >/dev/null <<AS
+tell application "iTerm2"
+  tell current session of current window
+    set s to (split vertically with default profile)
+    tell s
+      write text "$C"
+      set name to "$N"
+    end tell
+  end tell
+end tell
+AS
+    ;;
+esac
+
+print "cct: $MODE → $TARGET  (tmux: $SESS)"

@@ -1,0 +1,59 @@
+#!/bin/zsh
+# cc-inbox — watch a file for project names and open them as iTerm tabs.
+#
+# The bridge for launching a session FROM YOUR PHONE. Remote Control gives a
+# phone-driven session on this Mac, but that session cannot open a NEW tab in
+# a chosen folder. So it writes a line here instead, and this daemon acts on it.
+#
+#   cc-inbox watch     run the watcher (the launch agent does this)
+#   cc-inbox add exa   queue a project (this is what a remote session runs)
+#   cc-inbox status    show the queue and whether the watcher is live
+#
+# From the phone, tell Claude:  "run: cc-inbox add munshi"
+# A tab opens on the Mac in ~/Documents/Workspaces/munshi with claude running.
+
+INBOX="$HOME/.claude/cc-inbox.queue"
+LOG="$HOME/.claude/cc-inbox.log"
+touch "$INBOX" "$LOG"
+
+log() { print -r -- "$(date '+%F %T') $*" >> "$LOG" }
+
+case "${1:-status}" in
+  add)
+    shift
+    [[ -z "$1" ]] && { print -u2 "cc-inbox: add what? (cct -l lists projects)"; exit 2; }
+    print -r -- "$*" >> "$INBOX"
+    log "queued: $*"
+    print "cc-inbox: queued '$*' — a tab will open on the Mac within ~10s"
+    ;;
+  status)
+    print "queue: $(wc -l < "$INBOX" | tr -d ' ') pending"
+    [[ -s "$INBOX" ]] && sed 's/^/  /' "$INBOX"
+    if launchctl list 2>/dev/null | grep -q cc-inbox; then
+      print "watcher: running"
+    else
+      print "watcher: NOT running — launchctl load ~/Library/LaunchAgents/com.claude-sessions.inbox.plist"
+    fi
+    print "log: $LOG"
+    ;;
+  watch)
+    # Single pass; the launch agent re-runs us. Safer than an infinite loop:
+    # if this crashes, launchd restarts it on the next interval.
+    [[ ! -s "$INBOX" ]] && exit 0
+    tmpf="$(mktemp)"
+    mv "$INBOX" "$tmpf"; touch "$INBOX"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      log "opening: $line"
+      # shell-split the line so `exa "some prompt"` works
+      if cct ${(z)line} >>"$LOG" 2>&1; then
+        log "ok: $line"
+      else
+        log "FAILED: $line"
+      fi
+      sleep 1
+    done < "$tmpf"
+    rm -f "$tmpf"
+    ;;
+  *) print -u2 "cc-inbox: unknown command $1"; exit 2 ;;
+esac

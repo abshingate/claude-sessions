@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+"""
+cc-session-map — persist the iTerm-tab -> Claude-session mapping, and rebuild
+                 the whole workspace after a reboot.
+
+Why this exists
+---------------
+A reboot kills every process; nothing keeps a Claude session running across
+one. But the transcripts survive on disk and each one records its `cwd` and
+`sessionId`. So the mapping is RECOVERABLE rather than merely remembered:
+even if the snapshot file is lost, `discover` rebuilds it from ~/.claude.
+
+  cc-session-map save        record what is open now (tmux + iTerm + Terminal)
+  cc-session-map show        print the saved map
+  cc-session-map discover    rebuild the map from transcripts on disk
+  cc-session-map restore     reopen the sessions that were open, resumed
+  cc-session-map restore -n  dry run
+  cc-session-map restore --all   every session in the map, not just open ones
+  cc-session-map restore 5   just the 5 most recent
+"""
+import json, os, glob, sys, time, subprocess, re
+
+HOME = os.path.expanduser("~")
+PROJECTS = f"{HOME}/.claude/projects"
+MAP = f"{HOME}/.claude/cc-session-map.json"
+
+
+def enc_to_path(enc: str) -> str:
+    """-Users-you-code-project -> /Users/you/code/project"""
+    return enc.replace("-", "/")
+
+
+def scan(project_dir: str, limit_lines: int = 60):
+    """Pull sessionId, cwd and an opening-prompt summary out of a transcript."""
+    cwd = sid = summary = None
+    try:
+        with open(project_dir, errors="ignore") as fh:
+            for i, line in enumerate(fh):
+                if i > limit_lines:
+                    break
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                cwd = cwd or o.get("cwd")
+                sid = sid or o.get("sessionId")
+                if summary is None and o.get("type") == "user":
+                    c = o.get("message", {}).get("content")
+                    if isinstance(c, str):
+                        summary = c
+                    elif isinstance(c, list):
+                        for p in c:
+                            if isinstance(p, dict) and p.get("type") == "text":
+                                summary = p["text"]
+                                break
+    except Exception:
+        pass
+    if summary:
+        summary = " ".join(summary.split())[:70]
+        # drop command-ish and pasted noise
+        if summary.startswith(("<", "echo ", "/")):
+            summary = None
+    return sid, cwd, summary
+
+
+def discover(max_age_days: float = 14.0, per_project: int = 3):
+    """Rebuild the map from disk. Newest real session per project folder.
+
+    A session that is CURRENTLY OPEN is always kept, whatever the per-project
+    cap says. Without this the cap silently dropped 4 of 6 open sessions
+    in one busy project - exactly the ones a restore must not lose.
+    """
+    cutoff = time.time() - max_age_days * 86400
+    live = live_session_ids()
+    by_dir = {}
+    for pdir in sorted(glob.glob(f"{PROJECTS}/*")):
+        if not os.path.isdir(pdir):
+            continue
+        enc = os.path.basename(pdir)
+        # skip scratchpads and temp dirs - never worth restoring
+        if "private-tmp" in enc or "scratchpad" in enc:
+            continue
+        for f in sorted(glob.glob(f"{pdir}/*.jsonl"), key=os.path.getmtime, reverse=True):
+            b = os.path.basename(f)[:-6]
+            if b.startswith("agent-"):
+                continue
+            mt = os.path.getmtime(f)
+            if mt < cutoff:
+                break  # files are newest-first, so everything after is older
+            if os.path.getsize(f) < 4096:      # trivial/aborted sessions
+                continue
+            sid, cwd, summary = scan(f)
+            if not sid or not cwd or not os.path.isdir(cwd):
+                continue
+            by_dir.setdefault(cwd, [])
+            is_live = sid in live
+            if len(by_dir[cwd]) >= per_project and not is_live:
+                continue
+            by_dir[cwd].append({
+                "session_id": sid,
+                "cwd": cwd,
+                "label": os.path.basename(cwd),
+                "summary": summary or "(no opening prompt)",
+                "last_active": int(mt),
+                "was_open": is_live,
+            })
+    rows = [r for v in by_dir.values() for r in v]
+    rows.sort(key=lambda r: -r["last_active"])
+    return rows
+
+
+def live_session_ids():
+    """Session ids that are actually RUNNING right now.
+
+    Read from the process table, not from window titles. Titles used to carry
+    `--resume <uuid>`, but once tabs are named after their tmux session that
+    text is gone - on 2026-09-26 this reported 1 open session while 14 were
+    running, which would have restored 1 of 14 after a reboot.
+    """
+    ids = set()
+    try:
+        out = subprocess.run(["ps", "-eo", "args"],
+                             capture_output=True, text=True, timeout=10).stdout
+        for line in out.splitlines():
+            if not line.lstrip().startswith("claude "):
+                continue
+            m = re.search(r"--resume\s+([0-9a-f-]{36})", line)
+            if m:
+                ids.add(m.group(1))
+    except Exception:
+        pass
+    # A session started without --resume still has a transcript; match it by
+    # the tmux session name -> cwd, resolved later by the caller.
+    return ids
+
+
+def running_tmux():
+    try:
+        out = subprocess.run(["tmux", "ls", "-F", "#{session_name}"],
+                             capture_output=True, text=True).stdout
+        return [l for l in out.splitlines() if l]
+    except Exception:
+        return []
+
+
+def save():
+    rows = discover()
+    data = {"saved_at": int(time.time()), "sessions": rows,
+            "tmux_running": running_tmux()}
+    os.makedirs(os.path.dirname(MAP), exist_ok=True)
+    with open(MAP, "w") as f:
+        json.dump(data, f, indent=2)
+    print(f"cc-session-map: saved {len(rows)} sessions -> {MAP}")
+    return data
+
+
+def load():
+    if not os.path.exists(MAP):
+        print("cc-session-map: no map yet. run: cc-session-map save", file=sys.stderr)
+        sys.exit(1)
+    return json.load(open(MAP))
+
+
+def show(rows=None):
+    data = {"sessions": rows} if rows is not None else load()
+    rows = data["sessions"]
+    if "saved_at" in data:
+        print(f"\033[36m{len(rows)} sessions — saved {time.strftime('%Y-%m-%d %H:%M', time.localtime(data['saved_at']))}\033[0m")
+    for i, r in enumerate(rows, 1):
+        age = (time.time() - r["last_active"]) / 3600
+        age_s = f"{age:.0f}h" if age < 48 else f"{age/24:.0f}d"
+        mark = "\033[33m●\033[0m" if r.get("was_open") else " "
+        print(f"{i:3d} {mark} \033[32m{r['label'][:17]:<17}\033[0m {r['session_id'][:8]}  "
+              f"\033[90m{age_s:>4}\033[0m  {r['summary'][:56]}")
+
+
+def restore(dry=False, limit=None, open_only=True):
+    """Reopen sessions as iTerm2 tabs.
+
+    Default is the sessions that were OPEN when the map was saved - that is
+    what a reboot lost. Everything else in the map is history you can resume
+    deliberately, not something to dump 35 tabs of on every restart.
+    """
+    data = load()
+    rows = data["sessions"]
+    if open_only:
+        marked = [r for r in rows if r.get("was_open")]
+        if marked:
+            rows = marked
+    if limit:
+        rows = rows[:limit]
+    if dry:
+        print(f"cc-session-map: would open {len(rows)} tabs")
+        show(rows)
+        return
+    first = True
+    for r in rows:
+        # One source of truth for flags: CLAUDE_DEFAULT_FLAGS in ~/.zshrc.
+        # The tmux pane is non-interactive and never sources .zshrc, so the
+        # flags are passed explicitly here too.
+        flags = os.environ.get("CLAUDE_DEFAULT_FLAGS",
+                               "--dangerously-skip-permissions --chrome --remote-control")
+        # Name the Remote Control session after the folder, so the phone shows
+        # 16 distinguishable names rather than 16 copies of the hostname.
+        if "--remote-control" in flags:
+            flags = flags.replace("--remote-control",
+                                  f"--remote-control {r['label']}")
+        cmd = (f"cd {r['cwd']!r} && tmux new-session -A -s {r['label']} "
+               f"command claude {flags} --resume {r['session_id']}")
+        cmd_esc = cmd.replace("\\", "\\\\").replace('"', '\\"')
+        if first:
+            script = f'''
+tell application "iTerm2"
+  set w to (create window with default profile)
+  tell current session of current tab of w
+    write text "{cmd_esc}"
+    set name to "{r['label']}"
+  end tell
+end tell'''
+            first = False
+        else:
+            script = f'''
+tell application "iTerm2"
+  tell current window
+    set t to (create tab with default profile)
+    tell current session of t
+      write text "{cmd_esc}"
+      set name to "{r['label']}"
+    end tell
+  end tell
+end tell'''
+        subprocess.run(["osascript", "-e", script],
+                       capture_output=True)
+        print(f"  {r['label']:<17} {r['session_id'][:8]}  {r['summary'][:44]}")
+        time.sleep(0.5)
+    print(f"cc-session-map: restored {len(rows)} tabs")
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "show"
+    rest = sys.argv[2:]
+    n = None
+    for a in rest:
+        if a.isdigit():
+            n = int(a)
+    if cmd == "save":
+        show(save()["sessions"])
+    elif cmd == "discover":
+        show(discover())
+    elif cmd in ("show", "ls"):
+        show()
+    elif cmd == "restore":
+        restore(dry=("-n" in rest or "--dry-run" in rest), limit=n,
+                open_only=not ("--all" in rest))
+    elif cmd in ("-h", "--help"):
+        print(__doc__)
+    else:
+        print(f"cc-session-map: unknown command {cmd}", file=sys.stderr)
+        sys.exit(2)

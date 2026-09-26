@@ -1,0 +1,14 @@
+# claude-sessions — your projects
+#
+# Copy to ~/.config/claude-sessions/projects.conf and edit.
+#   <shortcut>  <path>
+# Paths may use ~ and $HOME. Lines starting with # are ignored.
+#
+# Then:  cct <shortcut>   opens a Claude session there
+#        ccw a b c        opens several as tabs in one window
+
+work      ~/code/work
+api       ~/code/api-service
+web       ~/code/web-app
+docs      ~/Documents/docs
+infra     ~/code/infrastructure

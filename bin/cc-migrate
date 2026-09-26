@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""
+cc-migrate — move running Claude sessions from Apple Terminal into iTerm2 tabs.
+
+Order matters: OPEN the new iTerm2 tab and confirm claude is running, and only
+THEN close the Terminal window. The reverse would kill a conversation with
+nothing to fall back on if the new tab failed to start.
+
+  cc-migrate            dry run - show the plan, change nothing
+  cc-migrate --go       do it
+  cc-migrate --go --only a5b55055   just that one session
+  cc-migrate --go --skip c3f1f98a   migrate all but these (comma-separated)
+  cc-migrate --go --keep-terminal   open the tabs, leave Terminal windows open
+"""
+import json, os, re, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+SELF = os.environ.get("CC_MIGRATE_SKIP", "")   # session id NOT to touch
+
+
+def osa(script, timeout=25):
+    return subprocess.run(["osascript", "-e", script],
+                          capture_output=True, text=True, timeout=timeout).stdout.strip()
+
+
+def terminal_sessions():
+    """Busy Terminal windows that are running a resumable claude session."""
+    out = osa('''
+tell application "Terminal"
+  set o to ""
+  repeat with i from 1 to count of windows
+    try
+      if busy of window i then set o to o & (id of window i) & "|" & (name of window i) & linefeed
+    end try
+  end repeat
+  return o
+end tell''')
+    rows = []
+    for line in out.splitlines():
+        if "|" not in line:
+            continue
+        wid, name = line.split("|", 1)
+        m = re.search(r"--resume\s+([0-9a-f-]{36})", name)
+        if not m:
+            continue
+        sid = m.group(1)
+        folder = name.split(" — ")[0].strip()
+        title = ""
+        parts = name.split(" — ")
+        if len(parts) > 1:
+            title = parts[1].lstrip("✳◐● ").strip()
+        rows.append({"wid": wid.strip(), "sid": sid, "folder": folder, "title": title})
+    return rows
+
+
+def cwd_for(sid):
+    """Authoritative folder for a session: read it from the transcript."""
+    base = f"{HOME}/.claude/projects"
+    for d in os.listdir(base):
+        p = f"{base}/{d}/{sid}.jsonl"
+        if os.path.exists(p):
+            try:
+                with open(p, errors="ignore") as fh:
+                    for i, line in enumerate(fh):
+                        if i > 40:
+                            break
+                        o = json.loads(line)
+                        if o.get("cwd"):
+                            return o["cwd"]
+            except Exception:
+                pass
+            return d.replace("-", "/")
+    return None
+
+
+def open_tab(cwd, sid, label, first):
+    flags = os.environ.get("CLAUDE_DEFAULT_FLAGS",
+                           "--dangerously-skip-permissions --chrome --remote-control")
+    if "--remote-control" in flags:
+        flags = flags.replace("--remote-control", f"--remote-control {label}")
+    sess = label
+    cmd = (f"cd {cwd!r} && tmux new-session -A -s {sess} "
+           f"command claude {flags} --resume {sid}")
+    c = cmd.replace("\\", "\\\\").replace('"', '\\"')
+    if first:
+        script = f'''
+tell application "iTerm2"
+  set w to (create window with default profile)
+  tell current session of current tab of w
+    write text "{c}"
+    set name to "{sess}"
+  end tell
+end tell'''
+    else:
+        script = f'''
+tell application "iTerm2"
+  tell current window
+    set t to (create tab with default profile)
+    tell current session of t
+      write text "{c}"
+      set name to "{sess}"
+    end tell
+  end tell
+end tell'''
+    osa(script)
+    return sess
+
+
+def tmux_has(sess):
+    r = subprocess.run(["tmux", "has-session", "-t", f"={sess}"], capture_output=True)
+    return r.returncode == 0
+
+
+def main():
+    go = "--go" in sys.argv
+    keep = "--keep-terminal" in sys.argv
+    # --only <prefix>: migrate just one session. Used to prove the whole path
+    # on a low-risk session before moving 13 live conversations at once.
+    only = None
+    if "--only" in sys.argv:
+        i = sys.argv.index("--only")
+        if i + 1 < len(sys.argv):
+            only = sys.argv[i + 1]
+    skip = set()
+    if "--skip" in sys.argv:
+        i = sys.argv.index("--skip")
+        if i + 1 < len(sys.argv):
+            skip = {x.strip() for x in sys.argv[i + 1].split(",") if x.strip()}
+    rows = [r for r in terminal_sessions() if not r["sid"].startswith(SELF[:8] or "\0")]
+    rows = [r for r in rows if not any(r["sid"].startswith(x) for x in skip)]
+    if only:
+        rows = [r for r in rows if r["sid"].startswith(only)]
+    if not rows:
+        print("cc-migrate: nothing to migrate")
+        return
+    print(f"cc-migrate: {len(rows)} sessions\n")
+    for i, r in enumerate(rows, 1):
+        cwd = cwd_for(r["sid"])
+        r["cwd"] = cwd
+        ok = "  " if cwd and os.path.isdir(cwd) else "!!"
+        print(f"{ok}{i:2d}  {r['folder'][:16]:<16} {r['sid'][:8]}  {(r['title'] or '')[:40]}")
+        if not cwd:
+            print(f"      no cwd found - will be SKIPPED")
+    if not go:
+        print("\ndry run. `cc-migrate --go` to do it.")
+        return
+
+    first = subprocess.run(["osascript", "-e",
+                            'tell application "iTerm2" to return count of windows'],
+                           capture_output=True, text=True).stdout.strip() in ("", "0")
+    migrated, failed = [], []
+    for r in rows:
+        if not r["cwd"] or not os.path.isdir(r["cwd"]):
+            failed.append((r, "no cwd")); continue
+        label = os.path.basename(r["cwd"])
+        n = 2
+        base = label
+        while tmux_has(label):
+            label = f"{base}-{n}"; n += 1
+        open_tab(r["cwd"], r["sid"], label, first)
+        first = False
+        # wait for the session to actually come up before trusting it
+        ok = False
+        for _ in range(20):
+            time.sleep(1)
+            if tmux_has(label):
+                ok = True; break
+        if ok:
+            migrated.append((r, label))
+            print(f"  ✓ {label:<18} {r['sid'][:8]}")
+        else:
+            failed.append((r, "tmux session never appeared"))
+            print(f"  ✗ {label:<18} {r['sid'][:8]}  did not start - Terminal window KEPT")
+
+    if migrated and not keep:
+        print("\nclosing migrated Terminal windows...")
+        # A *busy* Terminal window shows a confirmation sheet on close, so
+        # `close` silently does nothing. Kill the old claude process first -
+        # that makes the window idle - then close it. Verified 2026-09-26:
+        # without this, the old and new processes BOTH stayed alive on the
+        # same session id, two writers on one transcript.
+        for r, label in migrated:
+            # Identify the OLD process by ANCESTRY, not by pid order.
+            #
+            # First attempt used min(pid) on `pgrep -f --resume <sid>`, which
+            # was wrong twice over: pgrep also matches the migration's own
+            # shell wrappers, and the oldest pid is not reliably the old
+            # claude. Result on the 2026-09-26 bulk run: all 11 sessions ended
+            # with BOTH the Terminal process and the tmux process alive on one
+            # session id - two writers on one transcript.
+            #
+            # The new process always descends from tmux; the old one does not.
+            # That is the only stable discriminator.
+            def _ancestry(pid):
+                chain, cur = [], pid
+                for _ in range(12):
+                    out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(cur)],
+                                         capture_output=True, text=True).stdout.strip()
+                    if not out:
+                        break
+                    try:
+                        ppid, comm = out.split(None, 1)
+                    except ValueError:
+                        break
+                    chain.append(comm.strip())
+                    cur = int(ppid)
+                    if cur <= 1:
+                        break
+                return chain
+
+            allp = subprocess.run(["ps", "-eo", "pid,args"],
+                                  capture_output=True, text=True).stdout
+            real = []
+            for line in allp.splitlines():
+                if f"--resume {r['sid']}" not in line:
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) < 2 or not parts[1].lstrip().startswith("claude "):
+                    continue        # skip shell wrappers and tmux itself
+                real.append(int(parts[0]))
+            keep = [p for p in real if any("tmux" in c for c in _ancestry(p))]
+            old = [p for p in real if p not in keep]
+            # Never kill unless a tmux-parented replacement is confirmed alive.
+            if keep and old:
+                for p in old:
+                    subprocess.run(["kill", str(p)], capture_output=True)
+                time.sleep(1.0)
+            elif not keep:
+                print(f"    ! {label}: no tmux-parented process; leaving the "
+                      f"old one alone")
+
+            osa(f'''
+tell application "Terminal"
+  try
+    close (first window whose id is {r['wid']})
+  end try
+end tell''')
+            time.sleep(0.5)
+    print(f"\ncc-migrate: {len(migrated)} migrated, {len(failed)} failed")
+    for r, why in failed:
+        print(f"  ! {r['folder']} {r['sid'][:8]}: {why} (Terminal window left open)")
+
+
+if __name__ == "__main__":
+    main()

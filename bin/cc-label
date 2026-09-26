@@ -1,0 +1,37 @@
+#!/bin/zsh
+# cc-label — name each iTerm2 tab after the tmux session it is attached to.
+#
+# Why: tmux pushes its own terminal title, so every tab reads "tmux" and the
+# sessions are indistinguishable - the exact problem the naming was meant to
+# solve. This matches iTerm sessions to tmux clients BY TTY, which is the only
+# reliable link between them, and sets the name directly.
+#
+#   cc-label        rename every attached tab
+#   cc-label -n     dry run
+
+DRY=0
+[[ "$1" == "-n" || "$1" == "--dry-run" ]] && DRY=1
+
+tmux list-clients -F "#{client_tty} #{client_session}" 2>/dev/null | while read tty sess; do
+  [[ -z "$tty" || -z "$sess" ]] && continue
+  if (( DRY )); then
+    print "  $tty -> $sess"
+    continue
+  fi
+  osascript >/dev/null 2>&1 <<AS
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        set ss to current session of t
+        if (tty of ss) is "$tty" then
+          set name of ss to "$sess"
+        end if
+      end try
+    end repeat
+  end repeat
+end tell
+AS
+  print "  ✓ $sess"
+done
+(( DRY )) && print "dry run." || print "cc-label: done"

@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""
+cc-trust — report which project folders would stall on Claude's trust prompt.
+
+Why: --dangerously-skip-permissions does NOT bypass the "Do you trust the
+files in this folder?" dialog for a folder Claude has not seen before. A
+restored tab then sits on that prompt forever, looking like it started.
+Found 2026-09-26 when a `cct ocr` session hung on exactly that.
+
+  cc-trust           report status for the known projects
+  cc-trust --all     every folder in ~/.claude.json
+  cc-trust --fix     mark the known projects trusted (asks first)
+"""
+import json, os, sys
+
+CFG = os.path.expanduser("~/.claude.json")
+HOME = os.path.expanduser("~")
+WS = f"{HOME}/Documents/Workspaces"
+def _known():
+    """Project folders to check, from the user's projects.conf."""
+    import os
+    cfg = os.environ.get("CS_PROJECTS_FILE") or os.path.expanduser(
+        "~/.config/claude-sessions/projects.conf")
+    out = []
+    try:
+        for line in open(cfg):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            if len(parts) == 2:
+                out.append(os.path.expanduser(os.path.expandvars(parts[1])))
+    except FileNotFoundError:
+        pass
+    return out
+
+KNOWN = _known()
+
+def load():
+    with open(CFG) as f:
+        return json.load(f)
+
+def status(d, paths):
+    rows = []
+    for p in paths:
+        e = d.get("projects", {}).get(p)
+        if e is None:
+            rows.append((p, "UNSEEN", "will prompt"))
+        elif e.get("hasTrustDialogAccepted") is True:
+            rows.append((p, "ok", ""))
+        else:
+            rows.append((p, "UNTRUSTED", "will prompt"))
+    return rows
+
+def main():
+    args = sys.argv[1:]
+    d = load()
+    paths = sorted(d.get("projects", {})) if "--all" in args else [p for p in KNOWN if os.path.isdir(p)]
+    rows = status(d, paths)
+    bad = [r for r in rows if r[1] != "ok"]
+    for p, st, note in rows:
+        mark = "\033[32m✓\033[0m" if st == "ok" else "\033[31m✗\033[0m"
+        print(f" {mark} {st:<10} {p} {note}")
+    print(f"\n{len(rows) - len(bad)} ok, \033[31m{len(bad)} would prompt\033[0m")
+    if not bad:
+        return
+    if "--fix" not in args:
+        print("run `cc-trust --fix` to mark them trusted")
+        return
+    print("\nThis marks each folder as trusted, so Claude will not ask again.")
+    print("Only do this for folders whose contents you actually trust.")
+    if input("proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+        print("aborted."); return
+    d.setdefault("projects", {})
+    for p, st, _ in bad:
+        e = d["projects"].setdefault(p, {})
+        e["hasTrustDialogAccepted"] = True
+    # back up before writing - this file holds all project state
+    bak = CFG + ".bak-cc-trust"
+    if not os.path.exists(bak):
+        with open(bak, "w") as f:
+            json.dump(load(), f)
+        print(f"backup: {bak}")
+    with open(CFG, "w") as f:
+        json.dump(d, f, indent=2)
+    print(f"marked {len(bad)} folders trusted")
+
+if __name__ == "__main__":
+    main()

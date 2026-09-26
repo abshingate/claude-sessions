@@ -1,0 +1,117 @@
+#!/bin/zsh
+# cc-reattach — reopen every detached tmux session as an iTerm2 tab.
+#
+# For when iTerm2 quits or crashes: the sessions survive (tmux holds them),
+# but the tabs are gone. This puts the tabs back. Claude keeps running
+# throughout - nothing is resumed or restarted, just re-attached.
+#
+#   cc-reattach        one tab per detached session
+#   cc-reattach -n     dry run
+#   cc-reattach -a     include sessions that are already attached
+
+setopt local_options no_nomatch
+DRY=0; ALL=0
+while [[ "$1" == -* ]]; do
+  case "$1" in
+    -n|--dry-run) DRY=1; shift ;;
+    -a|--all) ALL=1; shift ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) print -u2 "cc-reattach: unknown option $1"; exit 2 ;;
+  esac
+done
+
+if ! tmux ls >/dev/null 2>&1; then
+  print "cc-reattach: no tmux sessions — nothing to reattach."
+  exit 0
+fi
+
+SESSIONS=()
+while IFS= read -r line; do
+  name="${line%%:*}"
+  if (( ALL )) || [[ "$line" != *"(attached)"* ]]; then
+    SESSIONS+=("$name")
+  fi
+done < <(tmux ls 2>/dev/null)
+
+if [[ ${#SESSIONS} -eq 0 ]]; then
+  print "cc-reattach: all sessions already attached (use -a to force)."
+  exit 0
+fi
+
+print "cc-reattach: ${#SESSIONS} session(s)"
+if (( DRY )); then
+  for s in $SESSIONS; do print "  would reattach: $s"; done
+  exit 0
+fi
+
+open -g -a iTerm 2>/dev/null
+sleep 2
+
+# Maximise the window. Column/row counts in the profile only approximate the
+# screen; setting the frame from the actual visible bounds is exact and
+# survives a display change.
+maximise() {
+  osascript >/dev/null 2>&1 <<'AS'
+tell application "Finder" to set sb to bounds of window of desktop
+tell application "iTerm2"
+  try
+    set bounds of current window to {0, 0, (item 3 of sb), (item 4 of sb)}
+  end try
+end tell
+AS
+}
+
+first=1
+for s in $SESSIONS; do
+  # Plain attach. The tab NAME is set separately by `cc-label`, which matches
+  # iTerm sessions to tmux clients by TTY. Embedding an OSC escape in this
+  # command broke the AppleScript quoting and stopped every attach
+  # (2026-09-26) - keep the command simple and name the tab afterwards.
+  cmd="tmux attach -t ${(q)s}"
+  if (( first )) && [[ "$(osascript -e 'tell application "iTerm2" to return count of windows' 2>/dev/null)" == "0" ]]; then
+    osascript >/dev/null <<AS
+tell application "iTerm2"
+  set w to (create window with default profile)
+  tell current session of current tab of w
+    write text "$cmd"
+    set name to "$s"
+  end tell
+end tell
+AS
+  else
+    osascript >/dev/null <<AS
+tell application "iTerm2"
+  tell current window
+    set t to (create tab with default profile)
+    tell current session of t
+      write text "$cmd"
+      set name to "$s"
+    end tell
+  end tell
+end tell
+AS
+  fi
+  first=0
+  print "  ✓ $s"
+  sleep 0.4
+done
+# name the tabs; tmux reports "tmux" as the job otherwise
+# iTerm2 opens a fresh "Default" window/tab on launch that we did not ask
+# for; the sessions go into new tabs beside it. Close it so the count does
+# not creep up by one on every relaunch.
+osascript >/dev/null 2>&1 <<'AS'
+tell application "iTerm2"
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        set ss to current session of t
+        if (name of ss) is "Default" and (count of tabs of w) > 1 then close t
+      end try
+    end repeat
+  end repeat
+end tell
+AS
+
+maximise
+command -v cc-label >/dev/null 2>&1 && { sleep 1; cc-label >/dev/null 2>&1 }
+print "cc-reattach: done — claude was never restarted, only re-attached."
